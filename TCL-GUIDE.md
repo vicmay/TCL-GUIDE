@@ -1,4 +1,4 @@
-# TCL Cheatsheet
+# TCL Guide
 
 ## Table of Contents
 - [Basic Syntax](#basic-syntax)
