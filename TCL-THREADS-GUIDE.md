@@ -49,6 +49,130 @@ The Thread package provides several core commands:
 - `thread::rwmutex` - Reader-writer locks
 
 ### Shared Variables
+
+## Thread Extension API Reference {#api-reference}
+
+### Thread Management
+
+```tcl
+# Create a new thread with optional script
+thread::create ?-joinable? ?-preserved? ?script?
+
+# Get the ID of the current thread
+thread::id
+
+# Get IDs of all threads
+thread::names
+
+# Wait for a thread to exit
+thread::join threadId ?resultVarName?
+
+# Exit the current thread with optional result
+thread::exit ?result?
+
+# Get thread's Tcl interpreter
+thread::interp
+```
+
+### Thread Communication
+
+```tcl
+# Send a script to another thread for evaluation
+thread::send ?-async? ?-head? threadId script ?varname?
+
+# Create a new thread-shared queue
+thread::queue create ?queueName?
+
+# Put data into a queue
+thread::queue put queueName item ?item ...?
+
+# Get data from a queue (blocks if empty)
+thread::queue get queueName
+
+# Get data from a queue with timeout (ms)
+thread::queue get -unbuffered queueName ?timeout?
+
+# Get the number of items in the queue
+thread::queue size queueName
+
+# Destroy a queue
+thread::queue destroy queueName
+```
+
+### Mutex Operations
+
+```tcl
+# Create a new mutex
+thread::mutex create
+
+# Lock a mutex (blocks if already locked)
+thread::mutex lock mutexId
+
+# Unlock a mutex
+thread::mutex unlock mutexId
+
+# Attempt to lock a mutex (returns 1 if successful, 0 if not)
+thread::mutex trylock mutexId
+
+# Destroy a mutex
+thread::mutex destroy mutexId
+```
+
+### Condition Variables
+
+```tcl
+# Create a new condition variable
+thread::cond create
+
+# Wait on a condition variable
+thread::cond wait condId mutexId ?ms?
+
+# Signal one thread waiting on the condition
+thread::cond notify condId
+
+# Signal all threads waiting on the condition
+thread::cond broadcast condId
+
+# Destroy a condition variable
+thread::cond destroy condId
+```
+
+### Thread-Shared Variables (TSV)
+
+```tcl
+# Set a thread-shared variable
+tsv::set varName ?key? value
+
+# Get a thread-shared variable
+tsv::get varName ?key?
+
+# Get all keys of a thread-shared array
+tsv::array names arrayName ?pattern?
+
+# Unset a thread-shared variable
+tsv::unset varName ?key?
+```
+
+### Thread Pools
+
+```tcl
+# Create a thread pool
+thread::pool create ?-minworkers count? ?-maxworkers count? ?-initcmd script?
+
+# Add work item to the pool
+thread::pool post ?-detached? poolId script ?varname?
+
+# Wait for all tasks in the pool to complete
+thread::pool wait poolId
+
+# Get pool statistics
+thread::pool stats poolId
+
+# Destroy a thread pool
+thread::pool destroy poolId
+```
+
+### Shared Variables
 - `tsv::set`, `tsv::get` - Thread-shared variables
 - `tsv::array` - Shared array operations
 - `tsv::lock`, `tsv::unlock` - Shared variable locking
@@ -402,6 +526,21 @@ set dispatcher [thread::create {
         dispatch_event [lindex $event 0] [lindex $event 1]
     }
 }]
+
+# Register event handlers
+thread::send $dispatcher [list register_handler "data_received" handle_data_event]
+
+# Usage example
+proc handle_data_event {data} {
+    puts "Received data in thread [thread::id]: $data"
+}
+
+# Post events to the dispatcher
+thread::send -async $dispatcher [list thread::queue_put [list "data_received" "Test data"]]
+
+# Cleanup
+thread::send -async $dispatcher {thread::queue_put "QUIT"}
+thread::join $dispatcher
 ```
 
 ### Producer-Consumer Pattern
@@ -923,6 +1062,178 @@ proc profile_thread {tid duration} {
 }
 ```
 
+## Troubleshooting Common Issues {#troubleshooting}
+
+### Thread Hangs
+
+**Symptom**: Threads stop responding or appear to hang.
+
+**Possible Causes and Solutions**:
+1. **Deadlock**: Check for circular wait conditions
+   ```tcl
+   # Use the deadlock detection utility periodically
+   after 60000 detect_deadlocks  ;# Check every minute
+   ```
+
+2. **Infinite Wait**: Ensure all conditions are properly signaled
+   ```tcl
+   # Always use condition variables with a timeout
+   if {![thread::cond wait $condition $mutex 5000]} {
+       log_thread "WARNING" "Timeout waiting for condition"
+   }
+   ```
+
+### Memory Leaks
+
+**Symptom**: Memory usage grows over time.
+
+**Diagnosis and Prevention**:
+1. **Track object creation/destruction**:
+   ```tcl
+   proc track_object {obj} {
+       incr ::object_count
+       trace add command $obj delete [list incr ::object_count -1]
+       return $obj
+   }
+   ```
+
+2. **Periodic cleanup**:
+   ```tcl
+   proc cleanup_resources {} {
+       # Clean up unused resources
+       cleanup_temporary_files
+       cleanup_idle_connections
+       
+       # Schedule next cleanup
+       after 300000 cleanup_resources  ;# Every 5 minutes
+   }
+   ```
+
+### Performance Bottlenecks
+
+**Symptom**: Poor performance under load.
+
+**Optimization Techniques**:
+1. **Profile critical sections**:
+   ```tcl
+   proc profile {script name} {
+       set start [clock microseconds]
+       set result [uplevel 1 $script]
+       set elapsed [expr {[clock microseconds] - $start}]
+       log_thread "PROFILE" "$name took ${elapsed}µs"
+       return $result
+   }
+
+   # Usage
+   profile {
+       # Code to profile
+   } "expensive_operation"
+   ```
+
+2. **Reduce lock contention**:
+   ```tcl
+   # Fine-grained locking
+   set mutexes [lmap i {1 2 3 4 5} {thread::mutex create}]
+   proc get_mutex {key} {
+       global mutexes
+       return [lindex $mutexes [expr {[string length $key] % [llength $mutexes]}]]
+   }
+   ```
+
+## Testing Threaded Applications {#testing}
+
+### Unit Testing Threaded Code
+
+```tcl
+# Test framework setup
+package require tcltest
+
+# Test case for thread-safe counter
+proc test_thread_safe_counter {} {
+    set counter_mutex [thread::mutex create]
+    set counter 0
+
+    # Worker procedure
+    set worker_script [format {
+        global counter counter_mutex
+        for {set i 0} {$i < 1000} {incr i} {
+            thread::mutex lock $counter_mutex
+            incr counter
+            thread::mutex unlock $counter_mutex
+        }
+    }]
+
+    # Create worker threads
+    set threads {}
+    for {set i 0} {$i < 10} {incr i} {
+        lappend threads [thread::create $worker_script]
+    }
+
+    # Wait for all threads to complete
+    foreach tid $threads {
+        thread::join $tid
+    }
+
+    # Verify counter
+    tcltest::test counter-test-1.1 "Thread-safe counter test" -body {
+        return $counter
+    } -result 10000
+}
+
+# Run tests
+test_thread_safe_counter
+tcltest::cleanupTests
+```
+
+### Stress Testing
+
+```tcl
+proc stress_test {worker_count iterations} {
+    set workers {}
+    set results [dict create]
+
+    # Create workers
+    for {set i 0} {$i < $worker_count} {incr i} {
+        set tid [thread::create {
+            proc stress_work {iterations} {
+                set start [clock milliseconds]
+                for {set i 0} {$i < $iterations} {incr i} {
+                    # Simulate work
+                    after 1
+                }
+                return [expr {[clock milliseconds] - $start}]
+            }
+        }]
+        lappend workers $tid
+    }
+
+    # Distribute work
+    set i 0
+    foreach tid $workers {
+        thread::send -async $tid [list stress_work $iterations] [list apply {
+            {tid result} {
+                global results
+                dict set results $tid $result
+            }
+        } $tid]
+    }
+
+    # Wait for completion
+    while {[dict size $results] < $worker_count} {
+        after 100
+    }
+
+    # Report results
+    set total_time 0
+    dict for {tid time} $results {
+        puts "Worker $tid completed in ${time}ms"
+        set total_time [expr {$total_time + $time}]
+    }
+
+    puts "Average time per worker: [expr {$total_time / $worker_count}]ms"
+}
+```
+
 ## Complete Examples {#examples}
 
 ### Example 1: Web Server with Thread Pool
@@ -1155,3 +1466,38 @@ if {$argc >= 1} {
     puts "Usage: $argv0 <directory> \[pattern\] \[worker_count\]"
     exit
 }
+```
+
+## Further Reading {#further-reading}
+
+### Official Documentation
+- [Tcl Thread Extension Documentation](https://tcl.tk/doc/thread/)
+- [Tcl Thread Extension Source](https://core.tcl-lang.org/thread/)
+- [Tcl Thread Extension Wiki](https://wiki.tcl-lang.org/page/Thread)
+
+### Books
+- "Tcl/Tk 8.5 Programming Cookbook" by Bert Wheeler
+- "Practical Programming in Tcl and Tk" by Brent Welch
+- "Tcl and the Tk Toolkit" by John K. Ousterhout and Ken Jones
+
+### Online Resources
+- [Tcl Developer Xchange](https://www.tcl.tk/)
+- [Tcl'ers Wiki](https://wiki.tcl-lang.org/)
+- [Stack Overflow Tcl Tag](https://stackoverflow.com/questions/tagged/tcl)
+- [Tcl/Tk Documentation](https://www.tcl.tk/doc/)
+
+### Related Tools and Extensions
+- [Tcllib](https://core.tcl-lang.org/tcllib/doc/tcllib-1-20/embedded/index.html) - Standard Tcl Library
+- [TclX](https://sourceforge.net/projects/tclx/) - Extended Tcl
+- [TclKit](https://www.equi4.com/tclkit/) - Tcl runtime environment
+- [ActiveState Tcl](https://www.activestate.com/products/tcl/) - Commercial Tcl distribution
+
+### Community and Support
+- [Tcl Chat Room](https://chat.stackoverflow.com/rooms/19830/tcl) - Real-time help on Stack Overflow
+- [Tcl Mailing Lists](https://www.tcl.tk/community/tcl-moderated.html) - Mailing lists for Tcl developers
+- [Tcl Core Team](https://core.tcl-lang.org/index) - Core development team and resources
+
+### Related Standards
+- [Tcl Improvement Proposals (TIPs)](https://core.tcl-lang.org/tips/doc/trunk/index.md)
+- [Tcl Language Reference](https://www.tcl.tk/man/tcl8.6/TclCmd/contents.htm)
+- [Thread Extension Reference](https://www.tcl.tk/man/tcl/ThreadCmd/thread.htm)
